@@ -5,9 +5,11 @@
    * Strategy:
    *  - Each post lives in a div[aria-posinset] (FB's virtualized list item).
    *  - Post body text is inside div[data-ad-rendering-role="story_message"].
-   *  - Author name is in div[data-ad-rendering-role="profile_name"].
    *  - Timestamp can be parsed from comment aria-labels or the post's <a> links.
    *  - Comments are div[role="article"] nested inside the post container.
+   *
+   * Locale: supports 中文 (則留言、月/日/週、的留言、查看更多/顯示更多) and English
+   * (comments, month names, AM/PM, "Comment by …", See more/Show more/View more).
    *
    * FB anti-scrape: timestamps use CSS reordering (position:absolute; top:3em)
    * to shuffle visible characters. We handle this by reading aria-label on
@@ -30,17 +32,20 @@
       const href = link.getAttribute("href") || "";
       if (href.includes("/posts/") || href.includes("permalink")) {
         const visibleText = getVisibleText(link);
-        if (
-          visibleText &&
-          /\d/.test(visibleText) &&
-          (visibleText.includes("月") ||
+        if (visibleText && /\d/.test(visibleText)) {
+          const zh =
+            visibleText.includes("月") ||
             visibleText.includes("日") ||
             visibleText.includes("小時") ||
             visibleText.includes("分鐘") ||
             visibleText.includes("週") ||
-            /\d+[hmd]/.test(visibleText))
-        ) {
-          return visibleText;
+            /\d+[hmd]/.test(visibleText);
+          const en =
+            /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\b/i.test(visibleText) ||
+            /\d+\s*(?:hr|min|hour|minute|day|week|wk|h|m|d|w)s?\s*(?:ago)?/i.test(visibleText) ||
+            /(?:AM|PM|\d{1,2}:\d{2})/i.test(visibleText) ||
+            /at\s+\d/i.test(visibleText);
+          if (zh || en) return visibleText;
         }
       }
     }
@@ -61,9 +66,10 @@
     const links = postEl.querySelectorAll('a[href*="/posts/"]');
     for (const link of links) {
       const href = link.getAttribute("href") || "";
-      const match = href.match(/\/posts\/(\d+)/);
+      const path = href.split("?")[0];
+      const match = path.match(/\/posts\/(\d+)/);
       if (match) {
-        return `https://www.facebook.com${href.split("?")[0]}`;
+        return path.startsWith("http") ? path : `https://www.facebook.com${path}`;
       }
     }
 
@@ -72,11 +78,18 @@
       const href = link.getAttribute("href") || "";
       const match = href.match(/(\/groups\/\d+\/posts\/\d+\/)/);
       if (match) {
-        return `https://www.facebook.com${match[1]}`;
+        const path = match[1];
+        return href.startsWith("http") ? href.split("?")[0] : `https://www.facebook.com${path}`;
       }
     }
 
     return "";
+  }
+
+  function postIdFromLink(link) {
+    if (!link) return "";
+    const m = link.match(/\/posts\/(\d+)/);
+    return m ? m[1] : "";
   }
 
   function extractComments(postEl) {
@@ -85,35 +98,21 @@
 
     articles.forEach((article) => {
       const ariaLabel = article.getAttribute("aria-label") || "";
-
-      let authorName = "";
       let commentTime = "";
-      const labelMatch = ariaLabel.match(/^(.+?)的留言(.+)$/);
-      if (labelMatch) {
-        authorName = labelMatch[1].trim();
-        commentTime = labelMatch[2].trim();
-      }
-
-      if (!authorName) {
-        const nameEl = article.querySelector(
-          'a[role="link"][tabindex="0"] span.xzsf02u'
-        );
-        if (nameEl) authorName = nameEl.textContent.trim();
+      const zhMatch = ariaLabel.match(/^(.+?)的留言(.+)$/);
+      if (zhMatch) commentTime = zhMatch[2].trim();
+      else {
+        const enMatch = ariaLabel.match(/(?:,\s*|·\s*)([\d\w:\s,]+(?:AM|PM)?\s*(?:ago)?)$/i);
+        if (enMatch) commentTime = enMatch[1].trim();
       }
 
       let commentText = "";
       const textContainer = article.querySelector('div[dir="auto"]');
-      if (textContainer) {
-        commentText = getVisibleText(textContainer);
-      }
+      if (textContainer) commentText = getVisibleText(textContainer);
 
-      if (!commentText && !authorName) return;
+      if (!commentText) return;
 
-      comments.push({
-        author: authorName,
-        text: commentText,
-        time: commentTime,
-      });
+      comments.push({ text: commentText, time: commentTime });
     });
 
     return comments;
@@ -127,11 +126,9 @@
       'div[data-ad-rendering-role="story_message"]'
     );
     const postText = storyMsg ? getVisibleText(storyMsg) : "";
-
-    const profileName = postEl.querySelector(
-      'div[data-ad-rendering-role="profile_name"]'
-    );
-    const author = profileName ? getVisibleText(profileName) : "";
+    const hasExpandPrompt =
+      /查看更多|顯示更多|See more|Show more|View more/i.test(postText);
+    if (hasExpandPrompt) return;
 
     const timestamp = extractTimestampFromLink(postEl);
     const postLink = extractPostLink(postEl);
@@ -139,18 +136,21 @@
 
     const commentCountEl = Array.from(
       postEl.querySelectorAll('span[class*="xkrqix3"]')
-    ).find((el) => /\d+則留言/.test(el.textContent));
+    ).find(
+      (el) =>
+        /\d+則留言/.test(el.textContent) ||
+        /\d+\s*comment(?:s)?/i.test(el.textContent)
+    );
     const commentCount = commentCountEl
-      ? commentCountEl.textContent.trim()
-      : `${comments.length}則留言`;
+      ? parseInt(commentCountEl.textContent.match(/\d+/)?.[0] ?? "0", 10)
+      : comments.length;
 
     if (!postText && comments.length === 0) return;
 
     posts.push({
-      author,
+      post_id: postIdFromLink(postLink),
       post_text: postText,
       timestamp,
-      post_link: postLink,
       comment_count: commentCount,
       comments,
     });
