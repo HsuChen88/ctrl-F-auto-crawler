@@ -14,7 +14,7 @@ Facebook 私密社團貼文收集器。透過 Chrome DevTools Protocol (CDP) 連
 ## Install
 
 ```bash
-git clone <repo-url> && cd ctrl-F-auto-crawler
+git clone https://github.com/HsuChen88/ctrl-F-auto-crawler.git && cd ctrl-F-auto-crawler
 uv sync
 ```
 
