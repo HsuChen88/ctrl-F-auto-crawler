@@ -24,6 +24,18 @@ import pychrome
 
 EXTRACT_POSTS_JS = (Path(__file__).parent / "extract_posts.js").read_text()
 
+_RE_POST_ID = __import__("re").compile(r"/posts/(\d+)")
+
+
+def _post_id(post: dict) -> str:
+    """Dedup key: post_id from payload or parsed from post_link."""
+    pid = post.get("post_id") or ""
+    if pid:
+        return pid
+    link = post.get("post_link") or ""
+    m = _RE_POST_ID.search(link)
+    return m.group(1) if m else ""
+
 
 class PostCollector:
     def __init__(self):
@@ -32,7 +44,9 @@ class PostCollector:
     def merge(self, new_posts: list[dict]) -> int:
         added = 0
         for post in new_posts:
-            key = post.get("post_text", "")[:120]
+            key = _post_id(post)
+            if not key:
+                key = (post.get("post_text") or "")[:120]
             if not key:
                 continue
             if key not in self.posts:
