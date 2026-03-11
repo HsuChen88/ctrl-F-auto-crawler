@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Start Chrome/Chromium with remote debugging enabled.
+# Windows: use start_chrome.bat instead.
 # This lets the collector connect to your REAL browser session (not a bot).
 #
 # Usage: ./start_chrome.sh [port]
@@ -25,7 +26,9 @@ echo ""
 echo "Steps:"
 echo "  1. Chrome will open. Log into Facebook normally."
 echo "  2. Navigate to your private group page."
-echo "  3. In another terminal, run:  uv run python collector.py --port ${PORT}"
+echo "  3. In another terminal, run:"
+echo "     uv:    uv run python collector.py --port ${PORT}"
+echo "     venv:  source .venv/bin/activate && python collector.py --port ${PORT}"
 echo ""
 
 "${CHROME}" \
