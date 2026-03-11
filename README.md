@@ -7,15 +7,29 @@ Facebook 私密社團貼文收集器。透過 Chrome DevTools Protocol (CDP) 連
 ## Prerequisites
 
 - Python 3.12+
-- [uv](https://docs.astral.sh/uv/) (Python package manager)
+- 套件管理： [uv](https://docs.astral.sh/uv/)（推薦）或內建 venv + pip
 - Google Chrome 或 Chromium
 - 你必須是該 Facebook 私密社團的成員
 
 ## Install
 
+**方式一：使用 uv（推薦）**
+
 ```bash
 git clone https://github.com/HsuChen88/ctrl-F-auto-crawler.git && cd ctrl-F-auto-crawler
 uv sync
+```
+
+**方式二：不使用 uv（venv + pip）**
+
+若尚未安裝 uv，可用 Python 內建 venv：
+
+```bash
+git clone https://github.com/HsuChen88/ctrl-F-auto-crawler.git && cd ctrl-F-auto-crawler
+python3 -m venv .venv
+source .venv/bin/activate # Linux/MacOS 使用這個
+.venv\Scripts\activate    # Windows 使用這個
+pip install pychrome>=0.2.4 websocket-client>=1.9.0
 ```
 
 ## Usage
@@ -35,7 +49,12 @@ Chrome 會以 remote debugging 模式開啟（port 9222）。
 ### Terminal 2 — 啟動收集器
 
 ```bash
+# 若用 uv
 uv run python collector.py
+
+# 若用 venv（複製整行即可）
+source .venv/bin/activate && python collector.py
+# Windows: .venv\Scripts\activate && python collector.py
 ```
 
 腳本連線後會顯示提示，然後進入等待狀態。
@@ -59,11 +78,15 @@ uv run python collector.py
 #### 範例
 
 ```bash
-# 基本用法
+# 基本用法（uv）
 uv run python collector.py
+
+# 基本用法（venv）
+source .venv/bin/activate && python collector.py
 
 # 自訂輸出檔和讀取間隔
 uv run python collector.py --output outputs/batch1.json --interval 5
+source .venv/bin/activate && python collector.py --output outputs/batch1.json --interval 5
 ```
 
 ## Output Format
