@@ -342,6 +342,7 @@ class CommentInterceptor:
         self.tab.Network.enable()
         self.tab.Network.requestWillBeSent = self._on_request
         self.tab.Network.responseReceived = self._on_response
+        self.tab.Network.loadingFinished = self._on_loading_finished
 
     def _on_request(self, **kwargs):
         request = kwargs.get("request", {})
@@ -358,9 +359,10 @@ class CommentInterceptor:
             return
 
         with self._lock:
-            self._pending[request_id] = meta
+            self._pending[request_id] = {"meta": meta, "ready": False}
 
     def _on_response(self, **kwargs):
+        """Mark the request as GraphQL-matched; actual body fetch waits for loadingFinished."""
         request_id = kwargs.get("requestId", "")
         response = kwargs.get("response", {})
         url = response.get("url", "")
@@ -369,10 +371,20 @@ class CommentInterceptor:
             return
 
         with self._lock:
-            meta = self._pending.pop(request_id, None)
-        if not meta:
+            entry = self._pending.get(request_id)
+            if entry:
+                entry["ready"] = True
+
+    def _on_loading_finished(self, **kwargs):
+        """Body is fully buffered — now safe to call getResponseBody."""
+        request_id = kwargs.get("requestId", "")
+
+        with self._lock:
+            entry = self._pending.pop(request_id, None)
+        if not entry or not entry.get("ready"):
             return
 
+        meta = entry["meta"]
         query_name = identify_query(meta)
 
         try:
@@ -434,11 +446,16 @@ class CommentInterceptor:
 
     def _save_unknown(self, meta: dict, body: str):
         try:
+            try:
+                parsed = json.loads(body)
+                preview = parsed
+            except json.JSONDecodeError:
+                preview = body[:500]
             record = {
                 "ts": time.time(),
                 "friendly_name": meta.get("friendly_name", ""),
                 "doc_id": meta.get("doc_id", ""),
-                "body_preview": body[:500],
+                "body_preview": preview,
             }
             with open(self.unknown_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
