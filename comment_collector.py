@@ -152,9 +152,6 @@ def extract_comment_node(node: dict) -> dict | None:
     created_time = node.get("created_time")
     comment_id = node.get("legacy_fbid") or node.get("id", "")
     feedback_id = _deep_get(node, "feedback", "id", default="")
-    expansion_token = _deep_get(
-        node, "feedback", "expansion_info", "expansion_token", default=""
-    )
 
     if not body_text and not author_name:
         return None
@@ -165,7 +162,6 @@ def extract_comment_node(node: dict) -> dict | None:
         "author": author_name,
         "body": body_text,
         "created_time": created_time,
-        "expansion_token": expansion_token,
     }
 
 
