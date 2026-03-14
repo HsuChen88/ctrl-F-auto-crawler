@@ -29,6 +29,7 @@ import pychrome
 
 # GraphQL friendly names we care about
 COMMENTS_QUERIES = {
+    "CommentListComponentsRootQuery",
     "CommentsListComponentsPaginationQuery",
     "Depth1CommentsListPaginationQuery",
     "Depth2CommentsListPaginationQuery",
@@ -38,6 +39,7 @@ FOCUSED_STORY_QUERY = "CometFocusedStoryViewUFIQuery"
 
 # Known doc_ids (fallback when friendly name is absent)
 KNOWN_DOC_IDS = {
+    "26150828281212332": "CommentListComponentsRootQuery",
     "26619250424347780": "CommentsListComponentsPaginationQuery",
     "26276906848640473": "Depth1CommentsListPaginationQuery",
     "26902344142700705": "CometFocusedStoryViewUFIQuery",
@@ -190,6 +192,7 @@ def extract_comments_from_response(parsed_objects: list[dict]) -> list[dict]:
         if isinstance(obj, dict):
             # replies_connection.edges or display_comments_connection.edges
             for conn_key in (
+                "comments",
                 "replies_connection",
                 "display_comments_connection",
                 "comment_rendering_instances",
@@ -276,16 +279,23 @@ class CommentStore:
     def __init__(self):
         self._lock = threading.Lock()
         self._posts: dict[str, dict[str, dict]] = {}
+        self._parents: dict[str, dict[str, str]] = {}
+        self._post_last_seen: dict[str, float] = {}
         self._intercept_count = 0
 
-    def add_comments(self, post_id: str, comments: list[dict]) -> int:
+    def add_comments(
+        self, post_id: str, comments: list[dict], parent_comment_id: str = ""
+    ) -> int:
         if not post_id or not comments:
             return 0
         added = 0
         with self._lock:
             if post_id not in self._posts:
                 self._posts[post_id] = {}
+            if post_id not in self._parents:
+                self._parents[post_id] = {}
             bucket = self._posts[post_id]
+            parent_map = self._parents[post_id]
             for c in comments:
                 cid = c.get("comment_id", "")
                 if not cid:
@@ -296,7 +306,12 @@ class CommentStore:
                 else:
                     existing = bucket[cid]
                     if c.get("body") and not existing.get("body"):
-                        bucket[cid] = c
+                        existing.update(c)
+                    elif c.get("author") and not existing.get("author"):
+                        existing.update(c)
+                if parent_comment_id and cid != parent_comment_id:
+                    parent_map[cid] = parent_comment_id
+            self._post_last_seen[post_id] = time.time()
             self._intercept_count += 1
         return added
 
@@ -318,6 +333,88 @@ class CommentStore:
                 for pid, bucket in self._posts.items()
             }
 
+    def dump_structural(self) -> list[dict]:
+        """Return comment trees grouped by post_id."""
+        with self._lock:
+            records = []
+            for post_id, bucket in self._posts.items():
+                parent_map = self._parents.get(post_id, {})
+                records.append(self._build_structural_record(post_id, bucket, parent_map))
+            records.sort(key=lambda r: r["post_id"])
+            return records
+
+    def dump_structural_post(self, post_id: str) -> dict | None:
+        """Return structural record for one post_id."""
+        with self._lock:
+            bucket = self._posts.get(post_id)
+            if not bucket:
+                return None
+            parent_map = self._parents.get(post_id, {})
+            return self._build_structural_record(post_id, bucket, parent_map)
+
+    def evict_old_posts(self, max_posts: int) -> list[dict]:
+        """Evict oldest posts when exceeding max_posts. Returns evicted structural records."""
+        if max_posts <= 0:
+            return []
+        with self._lock:
+            current = len(self._posts)
+            if current <= max_posts:
+                return []
+
+            to_remove_count = current - max_posts
+            ordered = sorted(self._post_last_seen.items(), key=lambda x: x[1])
+            to_remove = [pid for pid, _ in ordered[:to_remove_count]]
+            evicted = []
+            for post_id in to_remove:
+                bucket = self._posts.pop(post_id, None)
+                if not bucket:
+                    continue
+                parent_map = self._parents.pop(post_id, {})
+                self._post_last_seen.pop(post_id, None)
+                evicted.append(self._build_structural_record(post_id, bucket, parent_map))
+            return evicted
+
+    @staticmethod
+    def _build_structural_record(
+        post_id: str,
+        bucket: dict[str, dict],
+        parent_map: dict[str, str],
+    ) -> dict:
+        children_map: dict[str, list[str]] = {}
+        root_ids = []
+
+        for cid in bucket:
+            parent_id = parent_map.get(cid, "")
+            if parent_id and parent_id in bucket and parent_id != cid:
+                children_map.setdefault(parent_id, []).append(cid)
+            else:
+                root_ids.append(cid)
+
+        def build_node(comment_id: str, visited: set[str]) -> dict:
+            if comment_id in visited:
+                return {"comment_id": comment_id, "cycle_detected": True, "replies": []}
+            visited.add(comment_id)
+            node = dict(bucket[comment_id])
+            node["parent_comment_id"] = parent_map.get(comment_id, "") or None
+            child_ids = children_map.get(comment_id, [])
+            child_ids_sorted = sorted(
+                child_ids,
+                key=lambda x: (bucket.get(x, {}).get("created_time") or 0, x),
+            )
+            node["replies"] = [build_node(cid, visited.copy()) for cid in child_ids_sorted]
+            return node
+
+        root_ids_sorted = sorted(
+            root_ids,
+            key=lambda x: (bucket.get(x, {}).get("created_time") or 0, x),
+        )
+        return {
+            "post_id": post_id,
+            "comments_count": len(bucket),
+            "root_comments_count": len(root_ids_sorted),
+            "comments": [build_node(cid, set()) for cid in root_ids_sorted],
+        }
+
 
 class CommentInterceptor:
     """CDP Network event listener that intercepts comment-related GraphQL responses."""
@@ -329,12 +426,16 @@ class CommentInterceptor:
         feedback_map: FeedbackMap,
         raw_path: Path,
         unknown_path: Path,
+        structural_path: Path,
+        max_posts_in_memory: int = 0,
     ):
         self.tab = tab
         self.store = store
         self.feedback_map = feedback_map
         self.raw_path = raw_path
         self.unknown_path = unknown_path
+        self.structural_path = structural_path
+        self.max_posts_in_memory = max_posts_in_memory
         self._pending: dict[str, dict] = {}
         self._lock = threading.Lock()
 
@@ -412,12 +513,22 @@ class CommentInterceptor:
 
     def _handle_comment_response(self, meta: dict, parsed: list[dict], query_name: str):
         variables = meta.get("variables", {})
-        feedback_b64 = variables.get("id", "")
+        feedback_b64 = (
+            variables.get("id")
+            or variables.get("feedbackID")
+            or variables.get("nodeID")
+            or self._extract_feedback_from_response(parsed)
+            or ""
+        )
         post_id = self.feedback_map.resolve(feedback_b64) if feedback_b64 else ""
         if not post_id:
             post_id = self.feedback_map.current_post_id
+        _, parent_comment_id = decode_feedback_id(feedback_b64) if feedback_b64 else ("", "")
 
         comments = extract_comments_from_response(parsed)
+
+        if not comments and query_name == "CommentsListComponentsPaginationQuery":
+            return
 
         raw_record = {
             "ts": time.time(),
@@ -429,7 +540,24 @@ class CommentInterceptor:
         }
         self._append_raw(raw_record)
 
-        added = self.store.add_comments(post_id, comments)
+        added = self.store.add_comments(
+            post_id=post_id,
+            comments=comments,
+            parent_comment_id=parent_comment_id,
+        )
+        self._append_structural_snapshot(post_id, query_name)
+
+        evicted = self.store.evict_old_posts(self.max_posts_in_memory)
+        for record in evicted:
+            self._append_structural_record(
+                {
+                    "ts": time.time(),
+                    "event": "evicted",
+                    "query": query_name,
+                    **record,
+                }
+            )
+
         n_posts, n_total = self.store.stats()
         print(
             f"\n  [{query_name}] post={post_id} "
@@ -437,12 +565,40 @@ class CommentInterceptor:
             flush=True,
         )
 
+    @staticmethod
+    def _extract_feedback_from_response(parsed: list[dict]) -> str:
+        for obj in parsed:
+            node = _deep_get(obj, "data", "node")
+            if isinstance(node, dict) and node.get("__typename") == "Feedback":
+                return node.get("id", "")
+        return ""
+
     def _append_raw(self, record: dict):
         try:
             with open(self.raw_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception as e:
             print(f"\n  [!] Failed to write raw log: {e}", file=sys.stderr)
+
+    def _append_structural_snapshot(self, post_id: str, query_name: str):
+        record = self.store.dump_structural_post(post_id)
+        if not record:
+            return
+        self._append_structural_record(
+            {
+                "ts": time.time(),
+                "event": "update",
+                "query": query_name,
+                **record,
+            }
+        )
+
+    def _append_structural_record(self, record: dict):
+        try:
+            with open(self.structural_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as e:
+            print(f"\n  [!] Failed to write structural log: {e}", file=sys.stderr)
 
     def _save_unknown(self, meta: dict, body: str):
         try:
@@ -503,12 +659,28 @@ def main():
         "--unknown", type=str, default="outputs/unknown_graphql.jsonl",
         help="Unrecognized GraphQL responses (JSONL)",
     )
+    parser.add_argument(
+        "--structural",
+        type=str,
+        default="outputs/comments_structural.jsonl",
+        help="Structured per-post output file (JSONL)",
+    )
+    parser.add_argument(
+        "--max-posts-in-memory",
+        type=int,
+        default=0,
+        help="Keep only latest N posts in memory (0 = unlimited)",
+    )
     args = parser.parse_args()
 
     output_path = Path(args.output)
     raw_path = Path(args.raw)
     unknown_path = Path(args.unknown)
+    structural_path = Path(args.structural)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    unknown_path.parent.mkdir(parents=True, exist_ok=True)
+    structural_path.parent.mkdir(parents=True, exist_ok=True)
 
     tab = connect_to_chrome(args.port)
     store = CommentStore()
@@ -520,6 +692,8 @@ def main():
         feedback_map=feedback_map,
         raw_path=raw_path,
         unknown_path=unknown_path,
+        structural_path=structural_path,
+        max_posts_in_memory=args.max_posts_in_memory,
     )
     interceptor.start()
 
@@ -530,6 +704,7 @@ def main():
             json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         print(f"\n\nSaved {n_comments} comments across {n_posts} posts to {output_path}")
+        print(f"Structured log: {structural_path}")
         print(f"Raw log: {raw_path}")
         try:
             tab.stop()
