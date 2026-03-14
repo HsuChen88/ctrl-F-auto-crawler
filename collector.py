@@ -22,8 +22,7 @@ from pathlib import Path
 
 import pychrome
 
-EXTRACT_POSTS_JS = (Path(__file__).parent / "extract_posts.js").read_text()
-
+EXTRACT_POSTS_JS = (Path(__file__).parent / "extract_posts.js").read_text(encoding="utf-8")
 _RE_POST_ID = __import__("re").compile(r"/posts/(\d+)")
 
 
