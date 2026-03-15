@@ -14,6 +14,7 @@ Usage:
 """
 
 import argparse
+import base64
 import json
 import signal
 import sys
@@ -36,6 +37,27 @@ def _post_id(post: dict) -> str:
     return m.group(1) if m else ""
 
 
+def _feedback_id(post_id: str, comment_id: str) -> str:
+    """Compute feedback_id from post_id and comment_id (same as GraphQL)."""
+    if not post_id or not comment_id:
+        return ""
+    raw = f"feedback:{post_id}_{comment_id}"
+    return base64.b64encode(raw.encode()).decode()
+
+
+def _enrich_comments(post_id: str, comments: list[dict]) -> list[dict]:
+    """Add feedback_id to each comment when comment_id is present."""
+    pid = post_id or ""
+    out = []
+    for c in comments:
+        rec = dict(c)
+        cid = rec.get("comment_id") or ""
+        if pid and cid:
+            rec["feedback_id"] = _feedback_id(pid, cid)
+        out.append(rec)
+    return out
+
+
 class PostCollector:
     def __init__(self):
         self.posts: dict[str, dict] = {}
@@ -48,6 +70,9 @@ class PostCollector:
                 key = (post.get("post_text") or "")[:120]
             if not key:
                 continue
+            pid = post.get("post_id") or key
+            post = dict(post)
+            post["comments"] = _enrich_comments(pid, post.get("comments", []))
             if key not in self.posts:
                 self.posts[key] = post
                 added += 1
