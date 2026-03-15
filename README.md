@@ -1,158 +1,157 @@
-# ctrl-F-auto-crawler
+# Ctrl-F Auto Crawler
 
-Facebook 私密社團貼文收集器。透過 Chrome DevTools Protocol (CDP) 連接你的**真實瀏覽器**，在你手動瀏覽社團頁面時，在背景靜默讀取 DOM 中已載入的貼文內容，匯出為結構化 JSON。
+Facebook 私密社團貼文收集器。
 
-**所有頁面操作（滾動、點擊展開留言、導航）都由你本人手動完成。腳本不會對頁面做任何操作，只讀取 DOM。**
+這是一個**混合式（Hybrid）**收集器，同時結合兩種技術來確保資料的完整性：
+1. **DOM Snapshot**：週期性讀取頁面上可見的貼文內容（所見即所得）。
+2. **GraphQL Interception**：在背景靜默攔截 Facebook 的 API 回應，獲取完整的留言結構（包含被摺疊的留言）。
+
+**核心原則：所有頁面操作（滾動、點擊展開留言、導航）都由你本人手動完成。腳本不會對頁面做任何操作，只被動讀取資料。**
+
+## 系統架構
+
+本系統採用雙軌並行收集策略，統一匯整至 `UnifiedPostStore` 進行去重與合併。
+
+```mermaid
+graph TD
+    User((使用者操作)) -->|1. 滾動/點擊| Browser[Chrome Browser]
+    
+    subgraph "Hybrid Collector (unified_collector.py)"
+        direction TB
+        
+        %% DOM 流程
+        Browser -->|2a. DOM Snapshot (每3秒)| JS[extract_posts.js]
+        JS -->|解析可見貼文| Store[UnifiedPostStore<br/>(In-Memory Merging)]
+        
+        %% GraphQL 流程
+        Browser -->|2b. Network Response| CDP[CDP Interceptor]
+        CDP -->|解析 GraphQL| GraphQL[GraphQL Parser]
+        GraphQL -->|補充完整留言/時間| Store
+        
+        %% 輸出流程
+        Store -->|Evict (記憶體滿時)| Stream[comments_structural.jsonl<br/>(串流寫入)]
+        Store -->|Ctrl+C 結束| Final[comments.json<br/>(完整匯出)]
+    end
+```
 
 ## Prerequisites
 
-- Python 3.12+
-- 套件管理： [uv](https://docs.astral.sh/uv/)（推薦）或內建 venv + pip
-- Google Chrome 或 Chromium
+- **Python 3.12+**
+- **[uv](https://docs.astral.sh/uv/)**（強烈推薦）或 `venv`
+- **Google Chrome** 或 Chromium
 - 你必須是該 Facebook 私密社團的成員
 
-## Install
-
-**方式一：使用 uv（推薦）**
+## Installation
 
 ```bash
-git clone https://github.com/HsuChen88/ctrl-F-auto-crawler.git && cd ctrl-F-auto-crawler
+git clone https://github.com/HsuChen88/ctrl-F-auto-crawler.git
+cd ctrl-F-auto-crawler
 uv sync
-```
-
-**方式二：不使用 uv（venv + pip）**
-
-若尚未安裝 uv，可用 Python 內建 venv：
-
-```bash
-git clone https://github.com/HsuChen88/ctrl-F-auto-crawler.git && cd ctrl-F-auto-crawler
-python3 -m venv .venv
-source .venv/bin/activate # Linux/MacOS 使用這個
-.venv\Scripts\activate    # Windows 使用這個
-pip install pychrome>=0.2.4 websocket-client>=1.9.0
 ```
 
 ## Usage
 
-整個流程需要**兩個 Terminal 視窗**同時運作。
+整個流程需要 **兩個 Terminal 視窗** 同時運作。
 
 ### Terminal 1 — 啟動 Chrome (Debug Mode)
 
 ```bash
 ./start_chrome.sh
 ```
-
-Chrome 會以 remote debugging 模式開啟（port 9222）。
-
-> 首次啟動會使用獨立的瀏覽器 profile（`~/.config/chrome-debug-profile`），不會影響你平常的 Chrome。
+Chrome 會以 remote debugging 模式開啟（port 9222），使用獨立的設定檔，不會影響日常使用。
 
 ### Terminal 2 — 啟動收集器
 
-```bash
-# 若用 uv
-uv run python collector.py
-
-# 若用 venv（複製整行即可）
-source .venv/bin/activate && python collector.py
-# Windows: .venv\Scripts\activate && python collector.py
-```
-
-腳本連線後會顯示提示，然後進入等待狀態。
-
-### 在 Chrome 中手動操作
-
-1. 登入你的 Facebook 帳號
-2. 導航到目標私密社團頁面
-3. **像平常一樣瀏覽**：往下滾動、點擊「N則留言」展開留言
-4. Terminal 2 會即時顯示目前已收集到多少篇貼文
-5. 覺得夠了就回到 Terminal 2 按 **Ctrl+C** 結束，資料自動存檔
-
-#### 參數說明
-
-| 參數 | 預設值 | 說明 |
-|---|---|---|
-| `--port` | `9222` | Chrome remote debugging port |
-| `--output` | `posts.json` | 輸出檔案路徑 |
-| `--interval` | `3.0` | DOM 快照間隔秒數（多久讀一次畫面） |
-
-#### 範例
+執行整合版收集器：
 
 ```bash
-# 基本用法（uv）
-uv run python collector.py
-
-# 基本用法（venv）
-source .venv/bin/activate && python collector.py
-
-# 自訂輸出檔和讀取間隔
-uv run python collector.py --output outputs/batch1.json --interval 5
-source .venv/bin/activate && python collector.py --output outputs/batch1.json --interval 5
+uv run unified_collector.py
 ```
 
-## Output Format
+若需自訂參數：
+```bash
+# 範例：每 5 秒讀一次 DOM，記憶體保留最近 20 篇貼文
+uv run unified_collector.py --interval 5.0 --max-posts-in-memory 20
+```
 
-輸出為 JSON 陣列，每個元素代表一篇貼文：
+### 操作步驟
+
+1. 在 Terminal 1 開啟的 Chrome 中登入 Facebook。
+2. 進入目標社團。
+3. **開始手動瀏覽**：
+   - 往下滾動載入更多貼文。
+   - 點擊「查看更多留言」或「查看回覆」來觸發 GraphQL 請求（這會讓收集器抓到隱藏的留言）。
+4. Terminal 2 會即時顯示收集進度：
+   ```text
+     [#15] visible_posts=3 new_posts=1 | intercepts=45 | comments=120 | posts=10
+   ```
+5. 完成後按 **Ctrl+C**，程式會將剩餘資料寫入檔案並結束。
+
+## 檔案說明
+
+| 檔案 | 作用 |
+|------|------|
+| **`unified_collector.py`** | **主程式**。整合 DOM 輪詢與 GraphQL 監聽，維護資料一致性。 |
+| `common.py` | 共用工具庫（時間正規化、資料結構定義、Protocol）。 |
+| `extract_posts.js` | 注入瀏覽器的 JavaScript，負責解析 DOM 結構。 |
+| `comment_collector.py` | 負責處理 CDP Network 事件與 GraphQL 解析邏輯。 |
+| `collector.py` | 舊版入口（僅含 DOM 邏輯），目前作為 `extract_posts` 的載入器。 |
+
+## 輸入與輸出
+
+### 輸入
+- **無須設定檔**：直接讀取瀏覽器當前頁面。
+- **手動操作**：你的滾動與點擊就是輸入。
+
+### 輸出
+
+所有輸出檔案位於 `outputs/` 目錄下：
+
+#### 1. `comments_structural.jsonl` (主要產出)
+結構化的 JSONL 格式（JSON Lines），適合串流處理與大數據分析。每行代表一次「貼文寫出」事件（Eviction 或 Flush）。
 
 ```json
-[
-  {
-    "author": "王小明",
-    "post_text": "想詢問認識地球（下學期）的評價...",
-    "timestamp": "8月24日 下午5:27",
-    "post_link": "https://www.facebook.com/groups/123456/posts/789012/",
-    "comment_count": "2則留言",
-    "comments": [
-      {
-        "author": "李大華",
-        "text": "我修過下學期的，基本上有上課就輕鬆",
-        "time": "1 週前"
-      }
-    ]
-  }
-]
+{
+  "ts": 1710000000.0,
+  "event": "evicted",       // 或 "flush"
+  "query": "dom_snapshot",  // 或 GraphQL query name
+  "post_id": "12345678",
+  "post_text": "貼文內容...",
+  "timestamp": "2024年3月15日",
+  "comment_count": 50,
+  "comments": [
+    {
+      "comment_id": "987654321",
+      "author": "User A",
+      "body": "留言內容",
+      "time": "2024年3月15日",
+      "replies": [          // 巢狀結構
+        { "comment_id": "...", "body": "回覆內容..." }
+      ]
+    }
+  ]
+}
 ```
 
-## How It Works
+#### 2. `comments.json` (最終彙總)
+程式結束時匯出的完整 JSON 陣列。**注意**：若設有 `--max-posts-in-memory`，此檔案僅包含記憶體中最後殘留的貼文，完整的歷史資料請參考 `.jsonl` 檔。
 
-```
-┌──────────────────────────────────────────────────┐
-│  Terminal 1: Chrome (Debug Mode, port 9222)       │
-│  ┌────────────────────────────────────────────┐  │
-│  │  Facebook 社團頁面                          │  │
-│  │  你手動：滾動、點擊展開留言、正常瀏覽        │  │
-│  └────────────────────────────────────────────┘  │
-└──────────────────────┬───────────────────────────┘
-                       │ CDP (localhost:9222)
-                       │ 純本地連線，FB 看不到
-┌──────────────────────▼───────────────────────────┐
-│  Terminal 2: collector.py (純被動模式)             │
-│                                                   │
-│  每 N 秒做一件事：                                  │
-│    讀取當前 DOM → 提取可見貼文+留言 → 去重合併       │
-│                                                   │
-│  ✅ 只讀取 DOM，不產生任何網路請求                    │
-│  ✅ 不滾動、不點擊、不輸入、不導航                    │
-│  ✅ FB 伺服器端完全無法感知腳本的存在                 │
-│                                                   │
-│  Ctrl+C → 存檔為 JSON                              │
-└───────────────────────────────────────────────────┘
-```
+#### 3. `comments_raw.jsonl` (除錯用)
+紀錄原始的 GraphQL 回應資料，用於開發與除錯。
 
-## Safety
+## 運作原理細節
 
-此腳本的設計原則是**零風險**：
+1. **DOM Phase (`extract_posts.js`)**:
+   - 解決「我看到了什麼」的問題。
+   - 獲取貼文文字、連結、按讚數概觀。
+   - 解析目前展開的可見留言。
 
-- 腳本**不操作瀏覽器**，不觸發任何 Facebook API 請求
-- 所有操作等同你在 Chrome DevTools Console 中按 F12 查看 DOM
-- Facebook 伺服器端無法區分「你在看頁面」和「腳本在讀 DOM」
-- 唯一的風險來源是**你自己的手動操作速度**，正常瀏覽即可
+2. **GraphQL Phase (`comment_collector.py`)**:
+   - 解決「資料庫裡有什麼」的問題。
+   - 當你點擊「查看更多」時，FB 會發送 GraphQL 請求。
+   - 腳本攔截回應，獲取精確的 `created_time`、`feedback_id` 以及完整的留言樹狀結構。
 
-## File Structure
-
-```
-├── start_chrome.sh      # 啟動 Chrome Debug Mode
-├── collector.py         # 主程式：CDP 連接、被動讀取、匯出
-├── extract_posts.js     # 注入瀏覽器的 DOM 解析邏輯（純讀取）
-├── pyproject.toml       # Python 依賴管理
-└── README.md
-```
+3. **Merge Logic (`UnifiedPostStore`)**:
+   - 將 DOM 看到的資料與 GraphQL 攔截到的資料即時合併。
+   - 自動修正時間格式（將 "剛剛"、"1小時前" 轉換為絕對時間）。
+   - 記憶體管理：當貼文數量超過上限（預設 10），自動將舊貼文寫入硬碟並釋放記憶體，確保可長時間執行。
