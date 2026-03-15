@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 from collections import deque
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pychrome
@@ -49,6 +50,10 @@ KNOWN_DOC_IDS = {
 GRAPHQL_URL = "https://www.facebook.com/api/graphql/"
 
 _FOR_LOOP_PREFIX = re.compile(r"^for\s*\(;;\)\s*;\s*")
+_RELATIVE_TIME_RE = re.compile(
+    r"^\s*(\d+)\s*(秒|分鐘|小時|天|週|周|月|年|seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?|sec|min|hr|wk|mo|yr)\s*(前|ago)?\s*$",
+    re.IGNORECASE,
+)
 
 
 def decode_feedback_id(b64: str) -> tuple[str, str]:
@@ -97,6 +102,99 @@ def parse_response_body(raw: str) -> list[dict]:
             pass
 
     return results
+
+
+def _format_date_zh(dt: datetime) -> str:
+    return f"{dt.year}年{dt.month}月{dt.day}日"
+
+
+def _normalize_unix_timestamp(value) -> int | None:
+    if not isinstance(value, (int, float)):
+        return None
+    ts = float(value)
+    if ts > 1_000_000_000_000:
+        ts = ts / 1000.0
+    if ts < 946_684_800 or ts > 4_102_444_800:
+        return None
+    return int(ts)
+
+
+def normalize_post_timestamp(value: str, now: datetime | None = None) -> str:
+    """Normalize relative FB timestamps to absolute date (YYYY年M月D日)."""
+    text = (value or "").strip()
+    if not text:
+        return ""
+
+    lower = text.lower()
+    if lower in {"just now", "剛剛"}:
+        base = now or datetime.now()
+        return _format_date_zh(base)
+
+    match = _RELATIVE_TIME_RE.match(text)
+    if not match:
+        return text
+
+    amount = int(match.group(1))
+    unit = match.group(2).lower()
+    base = now or datetime.now()
+
+    if unit in {"秒", "second", "seconds", "sec", "secs"}:
+        dt = base - timedelta(seconds=amount)
+    elif unit in {"分鐘", "minute", "minutes", "min", "mins"}:
+        dt = base - timedelta(minutes=amount)
+    elif unit in {"小時", "hour", "hours", "hr", "hrs"}:
+        dt = base - timedelta(hours=amount)
+    elif unit in {"天", "day", "days"}:
+        dt = base - timedelta(days=amount)
+    elif unit in {"週", "周", "week", "weeks", "wk"}:
+        dt = base - timedelta(weeks=amount)
+    elif unit in {"月", "month", "months", "mo"}:
+        dt = base - timedelta(days=amount * 30)
+    elif unit in {"年", "year", "years", "yr"}:
+        dt = base - timedelta(days=amount * 365)
+    else:
+        return text
+    return _format_date_zh(dt)
+
+
+def extract_post_context_from_focused_story(parsed_objects: list[dict]) -> dict:
+    """Extract post-level context (timestamp/post_text) from focused-story response."""
+    creation_candidates: list[int] = []
+    text_candidates: list[str] = []
+
+    def _walk(obj):
+        if isinstance(obj, dict):
+            ts = _normalize_unix_timestamp(obj.get("creation_time"))
+            if ts is not None:
+                creation_candidates.append(ts)
+
+            for key in ("message", "title", "body", "content"):
+                val = obj.get(key)
+                if isinstance(val, dict):
+                    t = (val.get("text") or "").strip()
+                    if t:
+                        text_candidates.append(t)
+                elif isinstance(val, str):
+                    t = val.strip()
+                    if t:
+                        text_candidates.append(t)
+
+            for v in obj.values():
+                _walk(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                _walk(item)
+
+    for top in parsed_objects:
+        _walk(top)
+
+    context = {"post_text": "", "timestamp": ""}
+    if creation_candidates:
+        # Post creation time should be earliest among related nodes.
+        context["timestamp"] = _format_date_zh(datetime.fromtimestamp(min(creation_candidates)))
+    if text_candidates:
+        context["post_text"] = max(text_candidates, key=len)
+    return context
 
 
 def extract_request_meta(post_data: str) -> dict:
@@ -151,6 +249,7 @@ def extract_comment_node(node: dict) -> dict | None:
     body_text = _deep_get(node, "body", "text", default="")
     author_name = _deep_get(node, "author", "name", default="")
     created_time = node.get("created_time")
+    created_time_norm = _normalize_unix_timestamp(created_time)
     comment_id = node.get("legacy_fbid") or node.get("id", "")
     feedback_id = _deep_get(node, "feedback", "id", default="")
 
@@ -163,6 +262,7 @@ def extract_comment_node(node: dict) -> dict | None:
         "author": author_name,
         "body": body_text,
         "created_time": created_time,
+        "time": _format_date_zh(datetime.fromtimestamp(created_time_norm)) if created_time_norm else "",
     }
 
 
@@ -238,17 +338,27 @@ class FeedbackMap:
         self._lock = threading.Lock()
         self._map: dict[str, str] = {}
         self._current_post_id: str = ""
+        self._post_context: dict[str, dict] = {}
 
     def update_from_focused_story(self, meta: dict, parsed: list[dict]):
         """Extract post feedback_id from CometFocusedStoryViewUFIQuery."""
         variables = meta.get("variables", {})
         fb_id = variables.get("feedbackID", "")
+        context = extract_post_context_from_focused_story(parsed)
+        context["timestamp"] = normalize_post_timestamp(context.get("timestamp", ""))
         if fb_id:
             post_id, _ = decode_feedback_id(fb_id)
             if post_id:
                 with self._lock:
                     self._current_post_id = post_id
                     self._map[fb_id] = post_id
+                    rec = self._post_context.setdefault(post_id, {})
+                    if context.get("timestamp"):
+                        rec["timestamp"] = context["timestamp"]
+                    if context.get("post_text") and not rec.get("post_text"):
+                        rec["post_text"] = context["post_text"]
+                return {"post_id": post_id, **context}
+        return {}
 
     def resolve(self, feedback_b64: str) -> str:
         """Resolve a base64 feedback_id to a post_id."""
@@ -268,6 +378,12 @@ class FeedbackMap:
     def current_post_id(self) -> str:
         with self._lock:
             return self._current_post_id
+
+    def get_post_context(self, post_id: str) -> dict:
+        if not post_id:
+            return {}
+        with self._lock:
+            return dict(self._post_context.get(post_id, {}))
 
 
 class CommentStore:
@@ -522,7 +638,8 @@ class CommentInterceptor:
             return
 
         if query_name == FOCUSED_STORY_QUERY:
-            self.feedback_map.update_from_focused_story(meta, parsed)
+            focused_context = self.feedback_map.update_from_focused_story(meta, parsed)
+            self._sync_post_context_to_store(focused_context)
             return
 
         if query_name and query_name in COMMENTS_QUERIES:
@@ -542,6 +659,9 @@ class CommentInterceptor:
         post_id = self.feedback_map.resolve(feedback_b64) if feedback_b64 else ""
         if not post_id:
             post_id = self.feedback_map.current_post_id
+        self._sync_post_context_to_store(
+            {"post_id": post_id, **self.feedback_map.get_post_context(post_id)}
+        )
         _, parent_comment_id = decode_feedback_id(feedback_b64) if feedback_b64 else ("", "")
 
         comments = extract_comments_from_response(parsed)
@@ -559,6 +679,7 @@ class CommentInterceptor:
         }
         self._append_raw(raw_record)
 
+        evicted: list[dict] = []
         if (
             self.max_posts_in_memory > 0
             and post_id
@@ -566,22 +687,29 @@ class CommentInterceptor:
         ):
             n_posts, _ = self.store.stats()
             if n_posts >= self.max_posts_in_memory:
-                evicted = self.store.evict_oldest_posts(1)
-                for record in evicted:
-                    self._append_structural_record(
-                        {
-                            "ts": time.time(),
-                            "event": "evicted",
-                            "query": query_name,
-                            **record,
-                        }
-                    )
+                evicted.extend(self.store.evict_oldest_posts(1))
 
-        added = self.store.add_comments(
+        add_result = self.store.add_comments(
             post_id=post_id,
             comments=comments,
             parent_comment_id=parent_comment_id,
         )
+        if isinstance(add_result, tuple) and len(add_result) == 2:
+            added, add_evicted = add_result
+            if isinstance(add_evicted, list):
+                evicted.extend(add_evicted)
+        else:
+            added = int(add_result)
+
+        for record in evicted:
+            self._append_structural_record(
+                {
+                    "ts": time.time(),
+                    "event": "evicted",
+                    "query": query_name,
+                    **record,
+                }
+            )
 
         n_posts, n_total = self.store.stats()
         print(
@@ -589,6 +717,27 @@ class CommentInterceptor:
             f"new={added} batch={len(comments)} total={n_total} posts={n_posts}",
             flush=True,
         )
+
+    def _sync_post_context_to_store(self, context: dict):
+        post_id = context.get("post_id", "")
+        if not post_id:
+            return
+        updater = getattr(self.store, "update_post_metadata", None)
+        if not callable(updater):
+            return
+        try:
+            updater(
+                post_id=post_id,
+                post_text=context.get("post_text", ""),
+                timestamp=context.get("timestamp", ""),
+                source="graphql",
+            )
+        except TypeError:
+            updater(
+                post_id=post_id,
+                post_text=context.get("post_text", ""),
+                timestamp=context.get("timestamp", ""),
+            )
 
     @staticmethod
     def _extract_feedback_from_response(parsed: list[dict]) -> str:

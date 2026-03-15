@@ -206,8 +206,21 @@
       const commentTime = timeFromAriaLabel(ariaLabel);
 
       let commentText = "";
-      const textContainer = article.querySelector('div[dir="auto"]');
-      if (textContainer) commentText = getCommentBodyText(textContainer);
+      const firstLineDiv = article.querySelector('div[dir="auto"]');
+      if (firstLineDiv) {
+        const lineContainer = firstLineDiv.parentElement;
+        const allLineDivs = lineContainer
+          ? lineContainer.querySelectorAll(':scope > div[dir="auto"]')
+          : [];
+        if (allLineDivs.length > 1) {
+          commentText = Array.from(allLineDivs)
+            .map((div) => getCommentBodyText(div))
+            .filter(Boolean)
+            .join("\n");
+        } else {
+          commentText = getCommentBodyText(firstLineDiv);
+        }
+      }
 
       if (!commentText) return;
 
