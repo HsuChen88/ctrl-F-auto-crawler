@@ -67,8 +67,6 @@ class PostCollector:
         for post in new_posts:
             key = _post_id(post)
             if not key:
-                key = (post.get("post_text") or "")[:120]
-            if not key:
                 continue
             pid = post.get("post_id") or key
             post = dict(post)
