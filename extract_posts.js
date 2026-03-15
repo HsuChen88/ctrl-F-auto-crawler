@@ -33,9 +33,13 @@
     return (clone.textContent || "").trim().replace(/\s+/g, " ");
   }
 
-  /** Comment body with emoji preserved (FB puts emoji in aria-hidden nodes). */
-  function getCommentBodyText(el) {
+  /** Text with emoji preserved (FB puts emoji in aria-hidden nodes). */
+  function getTextWithEmoji(el) {
     return getVisibleText(el, { keepAriaHidden: true });
+  }
+
+  function getCommentBodyText(el) {
+    return getTextWithEmoji(el);
   }
 
   /** Prefer timestamp from the link's aria-labelledby target (correct order; FB shuffles chars with CSS). */
@@ -231,7 +235,7 @@
     const storyMsg = postEl.querySelector(
       'div[data-ad-rendering-role="story_message"]'
     );
-    const postText = storyMsg ? getVisibleText(storyMsg) : "";
+    const postText = storyMsg ? getTextWithEmoji(storyMsg) : "";
     const hasExpandPrompt =
       /查看更多|顯示更多|See more|Show more|View more/i.test(postText);
     if (hasExpandPrompt) return;
