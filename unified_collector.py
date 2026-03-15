@@ -44,6 +44,7 @@ class UnifiedPostStore:
         self._post_order: deque[str] = deque()
         self._intercept_count = 0
         self._max_posts_in_memory = max_posts_in_memory
+        self._evicted_post_ids: set[str] = set()
 
     @staticmethod
     def _new_post_frame(post: dict) -> dict:
@@ -214,6 +215,7 @@ class UnifiedPostStore:
             post = self._posts.pop(pid, None)
             if not post:
                 continue
+            self._evicted_post_ids.add(pid)
             evicted.append(self._build_structural_record(post))
         return evicted
 
@@ -241,6 +243,7 @@ class UnifiedPostStore:
                 post = self._posts.pop(pid, None)
                 if not post:
                     continue
+                self._evicted_post_ids.add(pid)
                 evicted.append(self._build_structural_record(post))
             return evicted
 
@@ -404,7 +407,7 @@ def main():
     parser.add_argument(
         "--unknown",
         type=str,
-        default="outputs/unknown_graphql.jsonl",
+        default="outputs/unused_graphql.jsonl",
         help="Unknown GraphQL output (JSONL)",
     )
     parser.add_argument(
@@ -464,7 +467,10 @@ def main():
             )
 
     def save_and_exit(sig=None, frame=None):
-        records = store.dump_structural()
+        records = [
+            r for r in store.dump_structural()
+            if r["post_id"] not in store._evicted_post_ids
+        ]
         for record in records:
             append_jsonl(
                 structural_path,

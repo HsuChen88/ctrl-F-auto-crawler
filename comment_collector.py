@@ -348,6 +348,7 @@ class CommentStore:
         self._post_last_seen: dict[str, float] = {}
         self._post_order: deque[str] = deque()
         self._intercept_count = 0
+        self._evicted_post_ids: set[str] = set()
 
     def add_comments(
         self, post_id: str, comments: list[dict], parent_comment_id: str = ""
@@ -436,6 +437,7 @@ class CommentStore:
                     continue
                 parent_map = self._parents.pop(post_id, {})
                 self._post_last_seen.pop(post_id, None)
+                self._evicted_post_ids.add(post_id)
                 evicted.append(build_structural_record(post_id, bucket, parent_map))
             return evicted
 
@@ -458,6 +460,7 @@ class CommentStore:
                     continue
                 parent_map = self._parents.pop(post_id, {})
                 self._post_last_seen.pop(post_id, None)
+                self._evicted_post_ids.add(post_id)
                 evicted.append(build_structural_record(post_id, bucket, parent_map))
             return evicted
 
@@ -662,8 +665,12 @@ class CommentInterceptor:
         return ""
 
     def flush_structural_buffer(self, query_name: str = "flush") -> int:
-        """Flush all buffered structural posts to JSONL."""
-        records = self.store.dump_structural()
+        """Flush all buffered structural posts to JSONL, skipping already-evicted posts."""
+        evicted_ids = getattr(self.store, "_evicted_post_ids", set())
+        records = [
+            r for r in self.store.dump_structural()
+            if r["post_id"] not in evicted_ids
+        ]
         for record in records:
             append_jsonl(
                 self.structural_path,
@@ -700,15 +707,11 @@ def main():
     )
     parser.add_argument("--port", type=int, default=9222, help="Chrome debug port")
     parser.add_argument(
-        "--output", type=str, default="outputs/comments.json",
-        help="Merged output file (JSON)",
-    )
-    parser.add_argument(
         "--raw", type=str, default="outputs/comments_raw.jsonl",
         help="Raw append-only log (JSONL)",
     )
     parser.add_argument(
-        "--unknown", type=str, default="outputs/unknown_graphql.jsonl",
+        "--unknown", type=str, default="outputs/unused_graphql.jsonl",
         help="Unrecognized GraphQL responses (JSONL)",
     )
     parser.add_argument(
