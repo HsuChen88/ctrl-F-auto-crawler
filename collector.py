@@ -14,7 +14,6 @@ Usage:
 """
 
 import argparse
-import base64
 import json
 import signal
 import sys
@@ -22,6 +21,8 @@ import time
 from pathlib import Path
 
 import pychrome
+
+from common import connect_to_chrome, feedback_id, get_tab_url
 
 EXTRACT_POSTS_JS = (Path(__file__).parent / "extract_posts.js").read_text(encoding="utf-8")
 _RE_POST_ID = __import__("re").compile(r"/posts/(\d+)")
@@ -37,14 +38,6 @@ def _post_id(post: dict) -> str:
     return m.group(1) if m else ""
 
 
-def _feedback_id(post_id: str, comment_id: str) -> str:
-    """Compute feedback_id from post_id and comment_id (same as GraphQL)."""
-    if not post_id or not comment_id:
-        return ""
-    raw = f"feedback:{post_id}_{comment_id}"
-    return base64.b64encode(raw.encode()).decode()
-
-
 def _enrich_comments(post_id: str, comments: list[dict]) -> list[dict]:
     """Add feedback_id to each comment when comment_id is present."""
     pid = post_id or ""
@@ -53,7 +46,7 @@ def _enrich_comments(post_id: str, comments: list[dict]) -> list[dict]:
         rec = dict(c)
         cid = rec.get("comment_id") or ""
         if pid and cid:
-            rec["feedback_id"] = _feedback_id(pid, cid)
+            rec["feedback_id"] = feedback_id(pid, cid)
         out.append(rec)
     return out
 
@@ -82,35 +75,6 @@ class PostCollector:
 
     def results(self) -> list[dict]:
         return list(self.posts.values())
-
-
-def connect_to_chrome(port: int) -> pychrome.Tab:
-    browser = pychrome.Browser(url=f"http://127.0.0.1:{port}")
-    tabs = browser.list_tab()
-    if not tabs:
-        print("Error: No tabs found. Open a tab first.", file=sys.stderr)
-        sys.exit(1)
-
-    fb_tab = None
-    for tab in tabs:
-        if "facebook.com" in get_tab_url(tab):
-            fb_tab = tab
-            break
-
-    if not fb_tab:
-        print("Warning: No Facebook tab found. Using first tab.", file=sys.stderr)
-        fb_tab = tabs[0]
-
-    fb_tab.start()
-    return fb_tab
-
-
-def get_tab_url(tab: pychrome.Tab) -> str:
-    tab_info = getattr(tab, "_kwargs", {})
-    if not isinstance(tab_info, dict):
-        return ""
-    url = tab_info.get("url", "")
-    return url if isinstance(url, str) else ""
 
 
 def extract_posts(tab: pychrome.Tab) -> list[dict]:
@@ -163,7 +127,7 @@ def main():
         posts = extract_posts(tab)
         added = collector.merge(posts)
         snapshot_count += 1
-        total = len(collector.results())
+        total = len(collector.posts)
 
         status = f"  [#{snapshot_count}] visible: {len(posts)} | new: {added} | total: {total}"
         print(f"\r{status}", end="", flush=True)

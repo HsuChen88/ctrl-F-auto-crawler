@@ -16,7 +16,6 @@ Usage:
 """
 
 import argparse
-import base64
 import json
 import re
 import signal
@@ -26,10 +25,26 @@ import time
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import unquote_plus
 
 import pychrome
 
-# GraphQL friendly names we care about
+from common import (
+    DAYS_PER_MONTH,
+    DAYS_PER_YEAR,
+    UNIX_TS_MAX,
+    UNIX_TS_MIN,
+    MetadataStore,
+    StoreProtocol,
+    append_jsonl,
+    build_structural_record,
+    connect_to_chrome,
+    decode_feedback_id,
+    deep_get,
+    get_tab_url,
+    parse_response_body,
+)
+
 COMMENTS_QUERIES = {
     "CommentListComponentsRootQuery",
     "CommentsListComponentsPaginationQuery",
@@ -39,7 +54,6 @@ COMMENTS_QUERIES = {
 
 FOCUSED_STORY_QUERY = "CometFocusedStoryViewUFIQuery"
 
-# Known doc_ids (fallback when friendly name is absent)
 KNOWN_DOC_IDS = {
     "26150828281212332": "CommentListComponentsRootQuery",
     "26619250424347780": "CommentsListComponentsPaginationQuery",
@@ -49,59 +63,12 @@ KNOWN_DOC_IDS = {
 
 GRAPHQL_URL = "https://www.facebook.com/api/graphql/"
 
-_FOR_LOOP_PREFIX = re.compile(r"^for\s*\(;;\)\s*;\s*")
 _RELATIVE_TIME_RE = re.compile(
     r"^\s*(\d+)\s*(秒|分鐘|小時|天|週|周|月|年|seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?|sec|min|hr|wk|mo|yr)\s*(前|ago)?\s*$",
     re.IGNORECASE,
 )
 
-
-def decode_feedback_id(b64: str) -> tuple[str, str]:
-    """Decode a base64 feedback ID like 'ZmVlZGJhY2s6NzgzNzEy...'.
-
-    Returns (post_id, comment_id_or_empty).
-    Format after decode: 'feedback:POST_ID' or 'feedback:POST_ID_COMMENT_ID'.
-    """
-    try:
-        decoded = base64.b64decode(b64 + "==").decode("utf-8", errors="ignore")
-    except Exception:
-        return ("", "")
-    m = re.match(r"feedback:(\d+)(?:_(\d+))?", decoded)
-    if not m:
-        return ("", "")
-    return (m.group(1), m.group(2) or "")
-
-
-def parse_response_body(raw: str) -> list[dict]:
-    """Parse FB GraphQL response body.
-
-    Handles:
-      - 'for (;;);' anti-XSSI prefix
-      - NDJSON (one JSON object per line)
-      - Single JSON object
-    """
-    raw = _FOR_LOOP_PREFIX.sub("", raw).strip()
-    if not raw:
-        return []
-
-    lines = raw.split("\n")
-    results = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            results.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-
-    if not results:
-        try:
-            results.append(json.loads(raw))
-        except json.JSONDecodeError:
-            pass
-
-    return results
+PENDING_TTL_SECONDS = 60
 
 
 def _format_date_zh(dt: datetime) -> str:
@@ -114,7 +81,7 @@ def _normalize_unix_timestamp(value) -> int | None:
     ts = float(value)
     if ts > 1_000_000_000_000:
         ts = ts / 1000.0
-    if ts < 946_684_800 or ts > 4_102_444_800:
+    if ts < UNIX_TS_MIN or ts > UNIX_TS_MAX:
         return None
     return int(ts)
 
@@ -149,9 +116,9 @@ def normalize_post_timestamp(value: str, now: datetime | None = None) -> str:
     elif unit in {"週", "周", "week", "weeks", "wk"}:
         dt = base - timedelta(weeks=amount)
     elif unit in {"月", "month", "months", "mo"}:
-        dt = base - timedelta(days=amount * 30)
+        dt = base - timedelta(days=amount * DAYS_PER_MONTH)
     elif unit in {"年", "year", "years", "yr"}:
-        dt = base - timedelta(days=amount * 365)
+        dt = base - timedelta(days=amount * DAYS_PER_YEAR)
     else:
         return text
     return _format_date_zh(dt)
@@ -190,7 +157,6 @@ def extract_post_context_from_focused_story(parsed_objects: list[dict]) -> dict:
 
     context = {"post_text": "", "timestamp": ""}
     if creation_candidates:
-        # Post creation time should be earliest among related nodes.
         context["timestamp"] = _format_date_zh(datetime.fromtimestamp(min(creation_candidates)))
     if text_candidates:
         context["post_text"] = max(text_candidates, key=len)
@@ -206,7 +172,6 @@ def extract_request_meta(post_data: str) -> dict:
         if "=" not in part:
             continue
         key, _, val = part.partition("=")
-        from urllib.parse import unquote_plus
         key = unquote_plus(key)
         val = unquote_plus(val)
         if key == "fb_api_req_friendly_name":
@@ -232,33 +197,23 @@ def identify_query(meta: dict) -> str | None:
     return None
 
 
-def _deep_get(obj, *keys, default=None):
-    """Safely traverse nested dicts."""
-    for k in keys:
-        if isinstance(obj, dict):
-            obj = obj.get(k)
-        else:
-            return default
-    return obj if obj is not None else default
-
-
 def extract_comment_node(node: dict) -> dict | None:
     """Extract a single comment from a GraphQL edge node."""
     if not isinstance(node, dict):
         return None
-    body_text = _deep_get(node, "body", "text", default="")
-    author_name = _deep_get(node, "author", "name", default="")
+    body_text = deep_get(node, "body", "text", default="")
+    author_name = deep_get(node, "author", "name", default="")
     created_time = node.get("created_time")
     created_time_norm = _normalize_unix_timestamp(created_time)
     comment_id = node.get("legacy_fbid") or node.get("id", "")
-    feedback_id = _deep_get(node, "feedback", "id", default="")
+    fb_id = deep_get(node, "feedback", "id", default="")
 
     if not body_text and not author_name:
         return None
 
     return {
         "comment_id": str(comment_id),
-        "feedback_id": feedback_id,
+        "feedback_id": fb_id,
         "author": author_name,
         "body": body_text,
         "created_time": created_time,
@@ -287,7 +242,6 @@ def extract_comments_from_response(parsed_objects: list[dict]) -> list[dict]:
 
     def _search(obj):
         if isinstance(obj, dict):
-            # replies_connection.edges or display_comments_connection.edges
             for conn_key in (
                 "comments",
                 "replies_connection",
@@ -299,7 +253,6 @@ def extract_comments_from_response(parsed_objects: list[dict]) -> list[dict]:
                     edges = conn.get("edges")
                     if edges:
                         _walk_edges(edges)
-                    # Also look deeper inside rendering instances
                     if conn_key == "comment_rendering_instances":
                         if isinstance(conn, dict):
                             for sub in conn.get("edges", []):
@@ -318,7 +271,6 @@ def extract_comments_from_response(parsed_objects: list[dict]) -> list[dict]:
     for top in parsed_objects:
         _search(top)
 
-    # Deduplicate by comment_id
     seen = set()
     unique = []
     for c in comments:
@@ -399,9 +351,9 @@ class CommentStore:
 
     def add_comments(
         self, post_id: str, comments: list[dict], parent_comment_id: str = ""
-    ) -> int:
+    ) -> tuple[int, list[dict]]:
         if not post_id or not comments:
-            return 0
+            return (0, [])
         added = 0
         with self._lock:
             if post_id not in self._posts:
@@ -428,7 +380,7 @@ class CommentStore:
                     parent_map[cid] = parent_comment_id
             self._post_last_seen[post_id] = time.time()
             self._intercept_count += 1
-        return added
+        return (added, [])
 
     @property
     def intercept_count(self) -> int:
@@ -454,7 +406,7 @@ class CommentStore:
             records = []
             for post_id, bucket in self._posts.items():
                 parent_map = self._parents.get(post_id, {})
-                records.append(self._build_structural_record(post_id, bucket, parent_map))
+                records.append(build_structural_record(post_id, bucket, parent_map))
             records.sort(key=lambda r: r["post_id"])
             return records
 
@@ -465,7 +417,7 @@ class CommentStore:
             if not bucket:
                 return None
             parent_map = self._parents.get(post_id, {})
-            return self._build_structural_record(post_id, bucket, parent_map)
+            return build_structural_record(post_id, bucket, parent_map)
 
     def has_post(self, post_id: str) -> bool:
         with self._lock:
@@ -484,7 +436,7 @@ class CommentStore:
                     continue
                 parent_map = self._parents.pop(post_id, {})
                 self._post_last_seen.pop(post_id, None)
-                evicted.append(self._build_structural_record(post_id, bucket, parent_map))
+                evicted.append(build_structural_record(post_id, bucket, parent_map))
             return evicted
 
     def evict_old_posts(self, max_posts: int) -> list[dict]:
@@ -506,49 +458,8 @@ class CommentStore:
                     continue
                 parent_map = self._parents.pop(post_id, {})
                 self._post_last_seen.pop(post_id, None)
-                evicted.append(self._build_structural_record(post_id, bucket, parent_map))
+                evicted.append(build_structural_record(post_id, bucket, parent_map))
             return evicted
-
-    @staticmethod
-    def _build_structural_record(
-        post_id: str,
-        bucket: dict[str, dict],
-        parent_map: dict[str, str],
-    ) -> dict:
-        children_map: dict[str, list[str]] = {}
-        root_ids = []
-
-        for cid in bucket:
-            parent_id = parent_map.get(cid, "")
-            if parent_id and parent_id in bucket and parent_id != cid:
-                children_map.setdefault(parent_id, []).append(cid)
-            else:
-                root_ids.append(cid)
-
-        def build_node(comment_id: str, visited: set[str]) -> dict:
-            if comment_id in visited:
-                return {"comment_id": comment_id, "cycle_detected": True, "replies": []}
-            visited.add(comment_id)
-            node = dict(bucket[comment_id])
-            node["parent_comment_id"] = parent_map.get(comment_id, "") or None
-            child_ids = children_map.get(comment_id, [])
-            child_ids_sorted = sorted(
-                child_ids,
-                key=lambda x: (bucket.get(x, {}).get("created_time") or 0, x),
-            )
-            node["replies"] = [build_node(cid, visited.copy()) for cid in child_ids_sorted]
-            return node
-
-        root_ids_sorted = sorted(
-            root_ids,
-            key=lambda x: (bucket.get(x, {}).get("created_time") or 0, x),
-        )
-        return {
-            "post_id": post_id,
-            "comments_count": len(bucket),
-            "root_comments_count": len(root_ids_sorted),
-            "comments": [build_node(cid, set()) for cid in root_ids_sorted],
-        }
 
 
 class CommentInterceptor:
@@ -557,7 +468,7 @@ class CommentInterceptor:
     def __init__(
         self,
         tab: pychrome.Tab,
-        store: CommentStore,
+        store: StoreProtocol,
         feedback_map: FeedbackMap,
         raw_path: Path,
         unknown_path: Path,
@@ -580,6 +491,16 @@ class CommentInterceptor:
         self.tab.Network.responseReceived = self._on_response
         self.tab.Network.loadingFinished = self._on_loading_finished
 
+    def _cleanup_stale_pending(self):
+        """Remove pending entries older than PENDING_TTL_SECONDS."""
+        now = time.time()
+        stale = [
+            rid for rid, entry in self._pending.items()
+            if now - entry.get("created_at", now) > PENDING_TTL_SECONDS
+        ]
+        for rid in stale:
+            self._pending.pop(rid, None)
+
     def _on_request(self, **kwargs):
         request = kwargs.get("request", {})
         url = request.get("url", "")
@@ -595,7 +516,11 @@ class CommentInterceptor:
             return
 
         with self._lock:
-            self._pending[request_id] = {"meta": meta, "ready": False}
+            self._pending[request_id] = {
+                "meta": meta,
+                "ready": False,
+                "created_at": time.time(),
+            }
 
     def _on_response(self, **kwargs):
         """Mark the request as GraphQL-matched; actual body fetch waits for loadingFinished."""
@@ -616,6 +541,7 @@ class CommentInterceptor:
         request_id = kwargs.get("requestId", "")
 
         with self._lock:
+            self._cleanup_stale_pending()
             entry = self._pending.pop(request_id, None)
         if not entry or not entry.get("ready"):
             return
@@ -677,7 +603,7 @@ class CommentInterceptor:
             "comments_count": len(comments),
             "comments": comments,
         }
-        self._append_raw(raw_record)
+        append_jsonl(self.raw_path, raw_record)
 
         evicted: list[dict] = []
         if (
@@ -689,26 +615,22 @@ class CommentInterceptor:
             if n_posts >= self.max_posts_in_memory:
                 evicted.extend(self.store.evict_oldest_posts(1))
 
-        add_result = self.store.add_comments(
+        added, add_evicted = self.store.add_comments(
             post_id=post_id,
             comments=comments,
             parent_comment_id=parent_comment_id,
         )
-        if isinstance(add_result, tuple) and len(add_result) == 2:
-            added, add_evicted = add_result
-            if isinstance(add_evicted, list):
-                evicted.extend(add_evicted)
-        else:
-            added = int(add_result)
+        evicted.extend(add_evicted)
 
         for record in evicted:
-            self._append_structural_record(
+            append_jsonl(
+                self.structural_path,
                 {
                     "ts": time.time(),
                     "event": "evicted",
                     "query": query_name,
                     **record,
-                }
+                },
             )
 
         n_posts, n_total = self.store.stats()
@@ -722,58 +644,37 @@ class CommentInterceptor:
         post_id = context.get("post_id", "")
         if not post_id:
             return
-        updater = getattr(self.store, "update_post_metadata", None)
-        if not callable(updater):
+        if not isinstance(self.store, MetadataStore):
             return
-        try:
-            updater(
-                post_id=post_id,
-                post_text=context.get("post_text", ""),
-                timestamp=context.get("timestamp", ""),
-                source="graphql",
-            )
-        except TypeError:
-            updater(
-                post_id=post_id,
-                post_text=context.get("post_text", ""),
-                timestamp=context.get("timestamp", ""),
-            )
+        self.store.update_post_metadata(
+            post_id=post_id,
+            post_text=context.get("post_text", ""),
+            timestamp=context.get("timestamp", ""),
+            source="graphql",
+        )
 
     @staticmethod
     def _extract_feedback_from_response(parsed: list[dict]) -> str:
         for obj in parsed:
-            node = _deep_get(obj, "data", "node")
+            node = deep_get(obj, "data", "node")
             if isinstance(node, dict) and node.get("__typename") == "Feedback":
                 return node.get("id", "")
         return ""
-
-    def _append_raw(self, record: dict):
-        try:
-            with open(self.raw_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except Exception as e:
-            print(f"\n  [!] Failed to write raw log: {e}", file=sys.stderr)
 
     def flush_structural_buffer(self, query_name: str = "flush") -> int:
         """Flush all buffered structural posts to JSONL."""
         records = self.store.dump_structural()
         for record in records:
-            self._append_structural_record(
+            append_jsonl(
+                self.structural_path,
                 {
                     "ts": time.time(),
                     "event": "flush",
                     "query": query_name,
                     **record,
-                }
+                },
             )
         return len(records)
-
-    def _append_structural_record(self, record: dict):
-        try:
-            with open(self.structural_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except Exception as e:
-            print(f"\n  [!] Failed to write structural log: {e}", file=sys.stderr)
 
     def _save_unknown(self, meta: dict, body: str):
         try:
@@ -788,33 +689,9 @@ class CommentInterceptor:
                 "doc_id": meta.get("doc_id", ""),
                 "body_preview": preview,
             }
-            with open(self.unknown_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            append_jsonl(self.unknown_path, record)
         except Exception:
             pass
-
-
-def connect_to_chrome(port: int) -> pychrome.Tab:
-    browser = pychrome.Browser(url=f"http://127.0.0.1:{port}")
-    tabs = browser.list_tab()
-    if not tabs:
-        print("Error: No tabs found.", file=sys.stderr)
-        sys.exit(1)
-
-    fb_tab = None
-    for tab in tabs:
-        tab_info = getattr(tab, "_kwargs", {})
-        url = tab_info.get("url", "") if isinstance(tab_info, dict) else ""
-        if isinstance(url, str) and "facebook.com" in url:
-            fb_tab = tab
-            break
-
-    if not fb_tab:
-        print("Warning: No Facebook tab found. Using first tab.", file=sys.stderr)
-        fb_tab = tabs[0]
-
-    fb_tab.start()
-    return fb_tab
 
 
 def main():
@@ -892,9 +769,7 @@ def main():
     signal.signal(signal.SIGINT, save_and_exit)
     signal.signal(signal.SIGTERM, save_and_exit)
 
-    tab_info = getattr(tab, "_kwargs", {})
-    tab_url = tab_info.get("url", "") if isinstance(tab_info, dict) else ""
-    print(f"Connected to: {tab_url}")
+    print(f"Connected to: {get_tab_url(tab)}")
     print(f"Output: {args.output} | Raw: {args.raw}")
     print()
     print("Listening for comment GraphQL responses...")

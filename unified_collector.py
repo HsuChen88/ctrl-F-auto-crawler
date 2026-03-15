@@ -11,7 +11,6 @@ writes structural JSONL records when evicting old posts or on final flush.
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import signal
 import sys
@@ -21,19 +20,19 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 
-from collector import connect_to_chrome, extract_posts, get_tab_url
+from collector import extract_posts
 from comment_collector import (
     CommentInterceptor,
     FeedbackMap,
     normalize_post_timestamp,
 )
-
-
-def feedback_id(post_id: str, comment_id: str) -> str:
-    if not post_id or not comment_id:
-        return ""
-    raw = f"feedback:{post_id}_{comment_id}"
-    return base64.b64encode(raw.encode()).decode()
+from common import (
+    append_jsonl,
+    build_structural_record,
+    connect_to_chrome,
+    feedback_id,
+    get_tab_url,
+)
 
 
 class UnifiedPostStore:
@@ -232,6 +231,19 @@ class UnifiedPostStore:
         with self._lock:
             return self._intercept_count
 
+    def evict_oldest_posts(self, count: int = 1) -> list[dict]:
+        if count <= 0:
+            return []
+        with self._lock:
+            evicted = []
+            while self._post_order and len(evicted) < count:
+                pid = self._post_order.popleft()
+                post = self._posts.pop(pid, None)
+                if not post:
+                    continue
+                evicted.append(self._build_structural_record(post))
+            return evicted
+
     def merge_dom_posts(self, posts: list[dict]) -> tuple[int, list[dict]]:
         """Merge DOM snapshots. Returns (new_posts_added, evicted_structural_records)."""
         added_posts = 0
@@ -362,48 +374,16 @@ class UnifiedPostStore:
         post_id = frame.get("post_id") or ""
         bucket: dict[str, dict] = frame.get("comments", {})
         parent_map: dict[str, str] = frame.get("parent_map", {})
-        children_map: dict[str, list[str]] = {}
-        root_ids = []
-
-        for cid in bucket:
-            parent_id = parent_map.get(cid, "")
-            if parent_id and parent_id in bucket and parent_id != cid:
-                children_map.setdefault(parent_id, []).append(cid)
-            else:
-                root_ids.append(cid)
-
-        def sort_key(comment_id: str):
-            c = bucket.get(comment_id, {})
-            created = c.get("created_time")
-            created_num = created if isinstance(created, int) else 0
-            return (created_num, comment_id)
-
-        def build_node(comment_id: str, visited: set[str]) -> dict:
-            if comment_id in visited:
-                return {"comment_id": comment_id, "cycle_detected": True, "replies": []}
-            visited.add(comment_id)
-            node = dict(bucket[comment_id])
-            if not node.get("parent_comment_id"):
-                node["parent_comment_id"] = None
-            child_ids = sorted(children_map.get(comment_id, []), key=sort_key)
-            node["replies"] = [build_node(child_id, visited.copy()) for child_id in child_ids]
-            return node
-
-        root_ids_sorted = sorted(root_ids, key=sort_key)
-        return {
-            "post_id": post_id,
-            "post_text": frame.get("post_text") or "",
-            "timestamp": frame.get("timestamp") or "",
-            "comment_count": int(frame.get("comment_count") or 0),
-            "comments_count": len(bucket),
-            "root_comments_count": len(root_ids_sorted),
-            "comments": [build_node(cid, set()) for cid in root_ids_sorted],
-        }
-
-
-def append_jsonl(path: Path, record: dict):
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return build_structural_record(
+            post_id,
+            bucket,
+            parent_map,
+            extra_fields={
+                "post_text": frame.get("post_text") or "",
+                "timestamp": frame.get("timestamp") or "",
+                "comment_count": int(frame.get("comment_count") or 0),
+            },
+        )
 
 
 def main():
