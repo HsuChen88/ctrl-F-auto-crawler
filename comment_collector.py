@@ -23,6 +23,7 @@ import signal
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 import pychrome
@@ -277,6 +278,7 @@ class CommentStore:
         self._posts: dict[str, dict[str, dict]] = {}
         self._parents: dict[str, dict[str, str]] = {}
         self._post_last_seen: dict[str, float] = {}
+        self._post_order: deque[str] = deque()
         self._intercept_count = 0
 
     def add_comments(
@@ -288,6 +290,7 @@ class CommentStore:
         with self._lock:
             if post_id not in self._posts:
                 self._posts[post_id] = {}
+                self._post_order.append(post_id)
             if post_id not in self._parents:
                 self._parents[post_id] = {}
             bucket = self._posts[post_id]
@@ -347,6 +350,26 @@ class CommentStore:
                 return None
             parent_map = self._parents.get(post_id, {})
             return self._build_structural_record(post_id, bucket, parent_map)
+
+    def has_post(self, post_id: str) -> bool:
+        with self._lock:
+            return post_id in self._posts
+
+    def evict_oldest_posts(self, count: int = 1) -> list[dict]:
+        """Evict oldest inserted posts (FIFO). Returns evicted structural records."""
+        if count <= 0:
+            return []
+        with self._lock:
+            evicted = []
+            while self._post_order and len(evicted) < count:
+                post_id = self._post_order.popleft()
+                bucket = self._posts.pop(post_id, None)
+                if not bucket:
+                    continue
+                parent_map = self._parents.pop(post_id, {})
+                self._post_last_seen.pop(post_id, None)
+                evicted.append(self._build_structural_record(post_id, bucket, parent_map))
+            return evicted
 
     def evict_old_posts(self, max_posts: int) -> list[dict]:
         """Evict oldest posts when exceeding max_posts. Returns evicted structural records."""
@@ -536,23 +559,29 @@ class CommentInterceptor:
         }
         self._append_raw(raw_record)
 
+        if (
+            self.max_posts_in_memory > 0
+            and post_id
+            and not self.store.has_post(post_id)
+        ):
+            n_posts, _ = self.store.stats()
+            if n_posts >= self.max_posts_in_memory:
+                evicted = self.store.evict_oldest_posts(1)
+                for record in evicted:
+                    self._append_structural_record(
+                        {
+                            "ts": time.time(),
+                            "event": "evicted",
+                            "query": query_name,
+                            **record,
+                        }
+                    )
+
         added = self.store.add_comments(
             post_id=post_id,
             comments=comments,
             parent_comment_id=parent_comment_id,
         )
-        self._append_structural_snapshot(post_id, query_name)
-
-        evicted = self.store.evict_old_posts(self.max_posts_in_memory)
-        for record in evicted:
-            self._append_structural_record(
-                {
-                    "ts": time.time(),
-                    "event": "evicted",
-                    "query": query_name,
-                    **record,
-                }
-            )
 
         n_posts, n_total = self.store.stats()
         print(
@@ -576,18 +605,19 @@ class CommentInterceptor:
         except Exception as e:
             print(f"\n  [!] Failed to write raw log: {e}", file=sys.stderr)
 
-    def _append_structural_snapshot(self, post_id: str, query_name: str):
-        record = self.store.dump_structural_post(post_id)
-        if not record:
-            return
-        self._append_structural_record(
-            {
-                "ts": time.time(),
-                "event": "update",
-                "query": query_name,
-                **record,
-            }
-        )
+    def flush_structural_buffer(self, query_name: str = "flush") -> int:
+        """Flush all buffered structural posts to JSONL."""
+        records = self.store.dump_structural()
+        for record in records:
+            self._append_structural_record(
+                {
+                    "ts": time.time(),
+                    "event": "flush",
+                    "query": query_name,
+                    **record,
+                }
+            )
+        return len(records)
 
     def _append_structural_record(self, record: dict):
         try:
@@ -664,7 +694,7 @@ def main():
     parser.add_argument(
         "--max-posts-in-memory",
         type=int,
-        default=0,
+        default=10,
         help="Keep only latest N posts in memory (0 = unlimited)",
     )
     args = parser.parse_args()
@@ -694,12 +724,14 @@ def main():
     interceptor.start()
 
     def save_and_exit(sig=None, frame=None):
+        flushed = interceptor.flush_structural_buffer()
         merged = store.dump()
         n_posts, n_comments = store.stats()
         output_path.write_text(
             json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         print(f"\n\nSaved {n_comments} comments across {n_posts} posts to {output_path}")
+        print(f"Flushed {flushed} buffered structural posts to {structural_path}")
         print(f"Structured log: {structural_path}")
         print(f"Raw log: {raw_path}")
         try:
