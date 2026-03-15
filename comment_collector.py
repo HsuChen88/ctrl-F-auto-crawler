@@ -473,9 +473,9 @@ class CommentInterceptor:
         tab: pychrome.Tab,
         store: StoreProtocol,
         feedback_map: FeedbackMap,
-        raw_path: Path,
-        unknown_path: Path,
-        structural_path: Path,
+        raw_path: Path | None,
+        unknown_path: Path | None,
+        structural_path: Path | None,
         max_posts_in_memory: int = 0,
     ):
         self.tab = tab
@@ -606,7 +606,8 @@ class CommentInterceptor:
             "comments_count": len(comments),
             "comments": comments,
         }
-        append_jsonl(self.raw_path, raw_record)
+        if self.raw_path is not None:
+            append_jsonl(self.raw_path, raw_record)
 
         evicted: list[dict] = []
         if (
@@ -625,16 +626,17 @@ class CommentInterceptor:
         )
         evicted.extend(add_evicted)
 
-        for record in evicted:
-            append_jsonl(
-                self.structural_path,
-                {
-                    "ts": time.time(),
-                    "event": "evicted",
-                    "query": query_name,
-                    **record,
-                },
-            )
+        if self.structural_path is not None:
+            for record in evicted:
+                append_jsonl(
+                    self.structural_path,
+                    {
+                        "ts": time.time(),
+                        "event": "evicted",
+                        "query": query_name,
+                        **record,
+                    },
+                )
 
         n_posts, n_total = self.store.stats()
         print(
@@ -671,16 +673,17 @@ class CommentInterceptor:
             r for r in self.store.dump_structural()
             if r["post_id"] not in evicted_ids
         ]
-        for record in records:
-            append_jsonl(
-                self.structural_path,
-                {
-                    "ts": time.time(),
-                    "event": "flush",
-                    "query": query_name,
-                    **record,
-                },
-            )
+        if self.structural_path is not None:
+            for record in records:
+                append_jsonl(
+                    self.structural_path,
+                    {
+                        "ts": time.time(),
+                        "event": "flush",
+                        "query": query_name,
+                        **record,
+                    },
+                )
         return len(records)
 
     def _save_unknown(self, meta: dict, body: str):
@@ -696,7 +699,8 @@ class CommentInterceptor:
                 "doc_id": meta.get("doc_id", ""),
                 "body_preview": preview,
             }
-            append_jsonl(self.unknown_path, record)
+            if self.unknown_path is not None:
+                append_jsonl(self.unknown_path, record)
         except Exception:
             pass
 

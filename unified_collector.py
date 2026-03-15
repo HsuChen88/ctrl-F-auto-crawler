@@ -393,22 +393,20 @@ def main():
     parser = argparse.ArgumentParser(description="Unified FB DOM + GraphQL collector")
     parser.add_argument("--port", type=int, default=9222, help="Chrome debug port")
     parser.add_argument(
-        "--raw",
+        "--output",
         type=str,
-        default="outputs/intercept_graphsql.jsonl",
-        help="Raw GraphQL capture output (JSONL)",
+        default="outputs",
+        help="Output directory (created if missing); used with --raw/--unknown/--structural",
+    )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Write raw GraphQL intercept to output/intercept_graphsql.jsonl",
     )
     parser.add_argument(
         "--unknown",
-        type=str,
-        default="outputs/unknown_graphql.jsonl",
-        help="Unknown GraphQL output (JSONL)",
-    )
-    parser.add_argument(
-        "--structural",
-        type=str,
-        default="outputs/comments_structural.jsonl",
-        help="Structured per-post output (JSONL)",
+        action="store_true",
+        help="Write unknown GraphQL requests to output/unknown_graphql.jsonl",
     )
     parser.add_argument(
         "--interval",
@@ -424,13 +422,12 @@ def main():
     )
     args = parser.parse_args()
 
-    raw_path = Path(args.raw)
-    unknown_path = Path(args.unknown)
-    structural_path = Path(args.structural)
-    raw_path.parent.mkdir(parents=True, exist_ok=True)
-    unknown_path.parent.mkdir(parents=True, exist_ok=True)
-    unknown_path.parent.mkdir(parents=True, exist_ok=True)
-    structural_path.parent.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(args.output)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = Path(out_dir / "intercept_graphsql.jsonl") if args.raw else None
+    unknown_path = Path(out_dir / "unknown_graphql.jsonl") if args.unknown else None
+    structural_path = Path(out_dir / "comments_structural.jsonl")
+
 
     tab = connect_to_chrome(args.port)
     store = UnifiedPostStore(max_posts_in_memory=args.max_posts_in_memory)
@@ -491,7 +488,7 @@ def main():
     print(
         f"DOM interval: {args.interval}s | max posts in memory: {args.max_posts_in_memory}"
     )
-    print(f"Structural: {args.structural} | Raw: {args.raw}")
+    print(f"Output: {out_dir} | Structural: {structural_path} | Raw: {raw_path} | Unknown: {unknown_path}")
     print()
     print("Now scroll and click in Facebook manually.")
     print("Collector will merge DOM snapshots and GraphQL comment responses.")
