@@ -393,12 +393,6 @@ def main():
     parser = argparse.ArgumentParser(description="Unified FB DOM + GraphQL collector")
     parser.add_argument("--port", type=int, default=9222, help="Chrome debug port")
     parser.add_argument(
-        "--output",
-        type=str,
-        default="outputs/comments.json",
-        help="Merged in-memory comments output (JSON)",
-    )
-    parser.add_argument(
         "--raw",
         type=str,
         default="outputs/comments_raw.jsonl",
@@ -430,12 +424,11 @@ def main():
     )
     args = parser.parse_args()
 
-    output_path = Path(args.output)
     raw_path = Path(args.raw)
     unknown_path = Path(args.unknown)
     structural_path = Path(args.structural)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     raw_path.parent.mkdir(parents=True, exist_ok=True)
+    unknown_path.parent.mkdir(parents=True, exist_ok=True)
     unknown_path.parent.mkdir(parents=True, exist_ok=True)
     structural_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -481,14 +474,10 @@ def main():
                     **record,
                 },
             )
-        merged = store.dump()
         n_posts, n_comments = store.stats()
-        output_path.write_text(
-            json.dumps(merged, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        print(f"\n\nSaved {n_comments} comments across {n_posts} posts to {output_path}")
-        print(f"Flushed {len(records)} buffered structural posts to {structural_path}")
+        print(f"\n\nFlushed {len(records)} buffered structural posts to {structural_path}")
+        print(f"Total: {n_comments} comments across {n_posts} posts")
+        print(f"Structural: {structural_path} | Raw: {raw_path}")
         try:
             tab.stop()
         except Exception:
@@ -502,7 +491,7 @@ def main():
     print(
         f"DOM interval: {args.interval}s | max posts in memory: {args.max_posts_in_memory}"
     )
-    print(f"Output: {args.output} | Structural: {args.structural} | Raw: {args.raw}")
+    print(f"Structural: {args.structural} | Raw: {args.raw}")
     print()
     print("Now scroll and click in Facebook manually.")
     print("Collector will merge DOM snapshots and GraphQL comment responses.")

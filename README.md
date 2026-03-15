@@ -30,7 +30,7 @@ graph TD
         
         %% 輸出流程
         Store -->|"Evict 記憶體滿時"| Stream["comments_structural.jsonl\n串流寫入"]
-        Store -->|"Ctrl+C 結束"| Final["comments.json\n完整匯出"]
+        Store -->|"Ctrl+C 結束"| Stream
     end
     
 ```
@@ -134,10 +134,7 @@ uv run unified_collector.py --interval 5.0 --max-posts-in-memory 20
 }
 ```
 
-#### 2. `comments.json` (最終彙總)
-程式結束時匯出的完整 JSON 陣列。**注意**：若設有 `--max-posts-in-memory`，此檔案僅包含記憶體中最後殘留的貼文，完整的歷史資料請參考 `.jsonl` 檔。
-
-#### 3. `comments_raw.jsonl` (除錯用)
+#### 2. `comments_raw.jsonl` (除錯用)
 紀錄原始的 GraphQL 回應資料，用於開發與除錯。
 
 ## 運作原理細節

@@ -728,12 +728,11 @@ def main():
     )
     args = parser.parse_args()
 
-    output_path = Path(args.output)
     raw_path = Path(args.raw)
     unknown_path = Path(args.unknown)
     structural_path = Path(args.structural)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     raw_path.parent.mkdir(parents=True, exist_ok=True)
+    unknown_path.parent.mkdir(parents=True, exist_ok=True)
     unknown_path.parent.mkdir(parents=True, exist_ok=True)
     structural_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -754,15 +753,10 @@ def main():
 
     def save_and_exit(sig=None, frame=None):
         flushed = interceptor.flush_structural_buffer()
-        merged = store.dump()
         n_posts, n_comments = store.stats()
-        output_path.write_text(
-            json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        print(f"\n\nSaved {n_comments} comments across {n_posts} posts to {output_path}")
-        print(f"Flushed {flushed} buffered structural posts to {structural_path}")
-        print(f"Structured log: {structural_path}")
-        print(f"Raw log: {raw_path}")
+        print(f"\n\nFlushed {flushed} buffered structural posts to {structural_path}")
+        print(f"Total: {n_comments} comments across {n_posts} posts")
+        print(f"Structured: {structural_path} | Raw: {raw_path}")
         try:
             tab.stop()
         except Exception:
@@ -773,7 +767,7 @@ def main():
     signal.signal(signal.SIGTERM, save_and_exit)
 
     print(f"Connected to: {get_tab_url(tab)}")
-    print(f"Output: {args.output} | Raw: {args.raw}")
+    print(f"Structural: {args.structural} | Raw: {args.raw}")
     print()
     print("Listening for comment GraphQL responses...")
     print("Open a post and click 'View more comments' / 'View replies' in the browser.")
