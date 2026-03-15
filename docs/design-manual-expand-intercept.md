@@ -47,7 +47,7 @@
   - 若 `response.url` 為 `https://www.facebook.com/api/graphql/` 且對應 request 為 POST，
   - 用 requestId 從 map 取出 request postData，檢查是否為 CommentsList / Depth1 / Depth2（fb_api_req_friendly_name 或 doc_id）。
   - 用 `Network.getResponseBody(requestId)` 取得回應 body。
-- **篩選**：只處理「留言相關」的回應；其餘忽略。若 **比對不上已知 doc / friendly name**，仍將 raw response 寫入 `unused_graphql.jsonl` 一類檔案，方便日後 FB 改 doc_id 時 debug。
+- **篩選**：只處理「留言相關」的回應；其餘忽略。若 **比對不上已知 doc / friendly name**，仍將 raw response 寫入 `unknown_graphql.jsonl` 一類檔案，方便日後 FB 改 doc_id 時 debug。
 - 通過篩選的 response body → 見下節「回應 body 格式」處理後，寫入 raw 儲存或送解析器。
 
 **回應 body 格式（實作必慮）**：
@@ -106,7 +106,7 @@
 
 1. **CDP 連線**：連到既有 Chrome（與 collector 相同 port），建議與 collector 共用同一 CDP session；只開 Network 監聽。
 2. **Request/Response 配對**：訂閱 `requestWillBeSent` 暫存 requestId → postData；`responseReceived` 時查表篩選並取 body。
-3. **篩選**：只處理 `POST /api/graphql/` 且 request 為 CommentsList / Depth1 / Depth2；未知 doc 寫入 `unused_graphql.jsonl`。
+3. **篩選**：只處理 `POST /api/graphql/` 且 request 為 CommentsList / Depth1 / Depth2；未知 doc 寫入 `unknown_graphql.jsonl`。
 4. **取 body**：`Network.getResponseBody`；strip `for (;;);`、支援 NDJSON 逐行 parse；必要時驗證 gzip 已解壓。
 5. **feedback_id → post_id**：從 CometFocusedStoryViewUFIQuery 或 base64 解碼建立/更新 mapping，Depth1/Depth2 依此歸屬貼文。
 6. **解析**：依 fb-comments-api-from-har.md 抽出 `replies_connection.edges`、feedback id、body.text、author、created_time、expansion_token。

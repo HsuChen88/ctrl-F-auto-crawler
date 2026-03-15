@@ -711,7 +711,7 @@ def main():
         help="Raw append-only log (JSONL)",
     )
     parser.add_argument(
-        "--unknown", type=str, default="outputs/unused_graphql.jsonl",
+        "--unknown", type=str, default="outputs/unknown_graphql.jsonl",
         help="Unrecognized GraphQL responses (JSONL)",
     )
     parser.add_argument(

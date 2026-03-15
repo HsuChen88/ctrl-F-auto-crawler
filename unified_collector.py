@@ -401,7 +401,7 @@ def main():
     parser.add_argument(
         "--unknown",
         type=str,
-        default="outputs/unused_graphql.jsonl",
+        default="outputs/unknown_graphql.jsonl",
         help="Unknown GraphQL output (JSONL)",
     )
     parser.add_argument(
