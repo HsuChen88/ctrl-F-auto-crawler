@@ -395,7 +395,7 @@ def main():
     parser.add_argument(
         "--raw",
         type=str,
-        default="outputs/comments_raw.jsonl",
+        default="outputs/intercept_graphsql.jsonl",
         help="Raw GraphQL capture output (JSONL)",
     )
     parser.add_argument(

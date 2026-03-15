@@ -707,7 +707,7 @@ def main():
     )
     parser.add_argument("--port", type=int, default=9222, help="Chrome debug port")
     parser.add_argument(
-        "--raw", type=str, default="outputs/comments_raw.jsonl",
+        "--raw", type=str, default="outputs/intercept_graphsql.jsonl",
         help="Raw append-only log (JSONL)",
     )
     parser.add_argument(
