@@ -14,24 +14,25 @@ Facebook 私密社團貼文收集器。
 
 ```mermaid
 graph TD
-    User((使用者操作)) -->|1. 滾動/點擊| Browser[Chrome Browser]
-    
-    subgraph "Hybrid Collector (unified_collector.py)"
+    User((使用者操作)) -->|"1. 手動滾動/點擊"| Browser[Chrome Browser]
+
+    subgraph HybridCollector
         direction TB
         
         %% DOM 流程
-        Browser -->|2a. DOM Snapshot (每3秒)| JS[extract_posts.js]
-        JS -->|解析可見貼文| Store[UnifiedPostStore<br/>(In-Memory Merging)]
+        Browser -->|"2a. DOM Snapshot 每N秒"| JS[extract_posts.js]
+        JS -->|"解析可見貼文"| Store["UnifiedPostStore\nIn-Memory Merging"]
         
         %% GraphQL 流程
-        Browser -->|2b. Network Response| CDP[CDP Interceptor]
-        CDP -->|解析 GraphQL| GraphQL[GraphQL Parser]
-        GraphQL -->|補充完整留言/時間| Store
+        Browser -->|"2b. Network Response"| CDP[CDP Interceptor]
+        CDP -->|"解析 GraphQL"| GraphQL[GraphQL Parser]
+        GraphQL -->|"補充完整留言/時間"| Store
         
         %% 輸出流程
-        Store -->|Evict (記憶體滿時)| Stream[comments_structural.jsonl<br/>(串流寫入)]
-        Store -->|Ctrl+C 結束| Final[comments.json<br/>(完整匯出)]
+        Store -->|"Evict 記憶體滿時"| Stream["comments_structural.jsonl\n串流寫入"]
+        Store -->|"Ctrl+C 結束"| Final["comments.json\n完整匯出"]
     end
+    
 ```
 
 ## Prerequisites
