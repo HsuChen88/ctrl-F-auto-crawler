@@ -224,6 +224,9 @@
 
       if (!commentText) return;
 
+      // Skip comments/replies that are still collapsed (contain expand prompt)
+      if (/查看更多|顯示更多|See more|Show more|View more/i.test(commentText)) return;
+
       const { commentId, replyCommentId } = idsFromArticle(article);
       const thisCommentId = replyCommentId || commentId || "";
       const author = authorFromAriaLabel(ariaLabel);
