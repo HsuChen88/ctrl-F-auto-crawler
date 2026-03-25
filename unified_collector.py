@@ -233,6 +233,11 @@ class UnifiedPostStore:
         with self._lock:
             return self._intercept_count
 
+    @property
+    def total_unique_posts(self) -> int:
+        with self._lock:
+            return len(self._posts) + len(self._evicted_post_ids)
+
     def evict_oldest_posts(self, count: int = 1) -> list[dict]:
         if count <= 0:
             return []
@@ -255,7 +260,7 @@ class UnifiedPostStore:
         with self._lock:
             for post in posts:
                 post_id = post.get("post_id") or ""
-                if not post_id:
+                if not post_id or post_id in self._evicted_post_ids:
                     continue
                 if post_id not in self._posts:
                     self._posts[post_id] = self._new_post_frame(post)
@@ -305,6 +310,8 @@ class UnifiedPostStore:
         now_dt = datetime.now()
         time_cache: dict[str, str] = {}
         with self._lock:
+            if post_id in self._evicted_post_ids:
+                return (0, [])
             if post_id not in self._posts:
                 self._posts[post_id] = self._new_post_frame({"post_id": post_id})
                 self._post_order.append(post_id)
@@ -349,6 +356,8 @@ class UnifiedPostStore:
         if not post_id:
             return
         with self._lock:
+            if post_id in self._evicted_post_ids:
+                return
             if post_id not in self._posts:
                 self._posts[post_id] = self._new_post_frame({"post_id": post_id})
                 self._post_order.append(post_id)
@@ -504,9 +513,10 @@ def main():
         snapshot_count += 1
         n_posts, n_comments = store.stats()
         intercepts = store.intercept_count
+        total_posts = store.total_unique_posts
         status = (
             f"  [#{snapshot_count}] visible_posts={len(posts)} new_posts={added_posts} "
-            f"| intercepts={intercepts} | comments={n_comments} | posts={n_posts}"
+            f"| intercepts={intercepts} | comments={n_comments} | posts={n_posts} | total_posts={total_posts}"
         )
         print(f"\r{status}", end="", flush=True)
         time.sleep(args.interval)
