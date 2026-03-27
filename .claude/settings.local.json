@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la /c/Users/ivonn/SideProjects/ctrl-F-auto-crawler/*.py /c/Users/ivonn/SideProjects/ctrl-F-auto-crawler/*.js /c/Users/ivonn/SideProjects/ctrl-F-auto-crawler/*.bat /c/Users/ivonn/SideProjects/ctrl-F-auto-crawler/*.txt)"
+    ]
+  }
+}

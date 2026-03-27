@@ -198,6 +198,52 @@ def append_jsonl(path: Path, record: dict):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Window / coordinate helpers for auto_clicker
+# ---------------------------------------------------------------------------
+
+
+def get_viewport_to_screen_offset(tab: pychrome.Tab) -> tuple[int, int, float]:
+    """Return (offset_x, offset_y, devicePixelRatio) to convert viewport coords to screen coords.
+
+    Uses window.screenX/screenY + outerHeight/innerHeight to compute the
+    Chrome UI chrome height (address bar, bookmarks, etc.).
+    """
+    info = tab.Runtime.evaluate(
+        expression="""
+        (() => ({
+            screenX: window.screenX,
+            screenY: window.screenY,
+            outerWidth: window.outerWidth,
+            outerHeight: window.outerHeight,
+            innerWidth: window.innerWidth,
+            innerHeight: window.innerHeight,
+            dpr: window.devicePixelRatio,
+        }))()
+        """,
+        returnByValue=True,
+    )
+    val = info.get("result", {}).get("value", {})
+    screen_x = val.get("screenX", 0)
+    screen_y = val.get("screenY", 0)
+    outer_h = val.get("outerHeight", 0)
+    inner_h = val.get("innerHeight", 0)
+    dpr = val.get("dpr", 1.0)
+    chrome_ui_height = outer_h - inner_h
+    return (screen_x, screen_y + chrome_ui_height, dpr)
+
+
+def viewport_to_screen(
+    vp_x: float, vp_y: float, offset: tuple[int, int, float]
+) -> tuple[int, int]:
+    """Convert viewport-relative coordinates to absolute screen coordinates."""
+    ox, oy, dpr = offset
+    # pyautogui on Windows with DPI awareness: screen coords are physical pixels
+    # if the process is DPI-unaware, we may need to divide by dpr.
+    # pyautogui.FAILSAFE coordinates use logical pixels on most setups.
+    return (int(ox + vp_x), int(oy + vp_y))
+
+
 def build_structural_record(
     post_id: str,
     bucket: dict[str, dict],
